@@ -25,4 +25,4 @@ generation_max_length: 448
 report_to: ["wandb"]
 run_name: "whisper-finetune-v1"
 output_dir: "/kaggle/working/whisper-small-finetune-checkpoints"
-dataset_path: "/kaggle/input/vimd-whisper-autotruncate/vimd-whisper-autotruncate"
+dataset_path: "/kaggle/input/datasets/ilewanducki/vimd-whisper-autotruncate/vimd-whisper-autotruncate"
