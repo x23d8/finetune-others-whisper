@@ -2,28 +2,27 @@ model_name: "openai/whisper-small"
 language: "vi"
 task: "transcribe"
 dataset_name: "nguyendv02/ViMD_Dataset"
-
-# Training arguments
-output_dir: "/kaggle/working/whisper-small-finetune-checkpoints"
-batch_size: 4 # P100:1; 16
-learning_rate: 1.0e-5
 num_epochs: 5
-max_steps: 3000
+# max_steps: 3000
+batch_size: 4            # P100: 1;  T4/V100: 16
+eval_batch_size: 8
+gradient_accumulation_steps: 2   # P100: 16; T4/V100: 2
+
+learning_rate: 1.0e-5
+weight_decay: 0.0
 warmup_steps: 300
+lr_scheduler_type: "linear"     
+fp16: true
+eval_strategy: "steps"         
 save_steps: 500
 eval_steps: 500
 logging_steps: 25
-gradient_accumulation_steps: 2 #P100:16; 2
-fp16: true
-
-# Input Kaggle Dataset
+save_total_limit: 3
+load_best_model_at_end: true
+metric_for_best_model: "wer"
+greater_is_better: false
+generation_max_length: 448
+report_to: ["wandb"]
+run_name: "whisper-finetune-v1"
+output_dir: "/kaggle/working/whisper-small-finetune-checkpoints"
 dataset_path: "/kaggle/input/vimd-whisper-autotruncate/vimd-whisper-autotruncate"
-
-
-
-
-
-
-
-
-
