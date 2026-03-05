@@ -71,7 +71,7 @@ def build_config(args):
     cli_to_cfg = {
         "model_name_or_path": "model_name",
         "dataset_name":       "dataset_name",
-        "dataset_path":       "dataset_path",
+        "dataset_path":       "/kaggle/input/datasets/ilewanducki/vimd-whisper-autotruncate/vimd-whisper-autotruncate",
         "language":           "language",
         "task":               "task",
         "output_dir":         "output_dir",

@@ -55,7 +55,7 @@ class WhisperDataHandler:
                 "test": process_split(raw_datasets["test"])
             }
         else:
-            dataset_path = self.config['dataset_path']
+            dataset_path = "/kaggle/input/datasets/ilewanducki/vimd-whisper-autotruncate/vimd-whisper-autotruncate"
             dataset_dict = {
                 "train": load_from_disk(os.path.join(dataset_path, "ViMD_train_features")),
                 "valid": load_from_disk(os.path.join(dataset_path, "ViMD_valid_features")),
