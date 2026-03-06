@@ -32,6 +32,16 @@ class WhisperDataHandler:
         batch["labels"] = self.processor.tokenizer(batch["text"], max_length=448, truncation=True).input_ids #int64
         return batch
 
+    @staticmethod
+    def _find_dataset_path(target_folder="ViMD_train_features", search_root="/kaggle/input"):
+        """Search /kaggle/input recursively for the dataset folder."""
+        print(f"Auto-searching for '{target_folder}' in '{search_root}'...")
+        for root, dirs, _ in os.walk(search_root):
+            if target_folder in dirs:
+                print(f"Found dataset at: {root}")
+                return root
+        return None
+
     def load_dataset(self, from_arrow=False):
         print(f"Load dataset: {self.config['dataset_name']} ...")
 
@@ -55,7 +65,19 @@ class WhisperDataHandler:
                 "test": process_split(raw_datasets["test"])
             }
         else:
-            dataset_path = self.config['dataset_path']
+            dataset_path = self.config.get('dataset_path', '')
+            train_path = os.path.join(dataset_path, "ViMD_train_features")
+
+            # If configured path doesn't work, auto-search /kaggle/input/
+            if not os.path.exists(train_path):
+                print(f"WARNING: Path not found: {train_path}")
+                dataset_path = self._find_dataset_path()
+                if dataset_path is None:
+                    raise FileNotFoundError(
+                        "Could not find 'ViMD_train_features' anywhere in /kaggle/input/. "
+                        "Make sure the dataset is added to your Kaggle notebook."
+                    )
+
             dataset_dict = {
                 "train": load_from_disk(os.path.join(dataset_path, "ViMD_train_features")),
                 "valid": load_from_disk(os.path.join(dataset_path, "ViMD_valid_features")),
