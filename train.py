@@ -177,6 +177,7 @@ def main():
     # 1. Load processor & model
     processor = WhisperProcessor.from_pretrained(cfg['model_name'], language=cfg['language'], task=cfg['task'])
     model = WhisperForConditionalGeneration.from_pretrained(cfg['model_name'])
+    print(f"  Mel bins  : {processor.feature_extractor.feature_size}")
 
     model.config.forced_decoder_ids = None
     model.config.suppress_tokens = []

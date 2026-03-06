@@ -81,8 +81,24 @@ class WhisperDataHandler:
             dataset_dict = {
                 "train": load_from_disk(os.path.join(dataset_path, "ViMD_train_features")),
                 "valid": load_from_disk(os.path.join(dataset_path, "ViMD_valid_features")),
-                "test": load_from_disk(os.path.join(dataset_path, "ViMD_test_features"))
+                "test": load_from_disk(os.path.join(dataset_path, "ViMD_test_features")),
             }
+
+            # --- Mel-bin mismatch guard ---
+            # Whisper large/large-v2/large-v3 use 128 mel bins; smaller models use 80.
+            # If the pre-computed features were created with a different model size,
+            # fall back to re-downloading and re-extracting from HuggingFace.
+            expected_mel_bins = self.processor.feature_extractor.feature_size
+            sample_features = dataset_dict["train"][0]["input_features"]
+            stored_mel_bins = len(sample_features)  # first dim = n_mels
+
+            if stored_mel_bins != expected_mel_bins:
+                print(
+                    f"\n[!] Mel-bin mismatch: stored features have {stored_mel_bins} bins "
+                    f"but the current model expects {expected_mel_bins}."
+                )
+                print("    Falling back to online processing from HuggingFace...\n")
+                return self.load_dataset(from_arrow=False)
 
         return dataset_dict
 
