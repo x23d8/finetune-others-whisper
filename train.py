@@ -3,11 +3,26 @@ from transformers import WhisperProcessor, WhisperForConditionalGeneration, Seq2
 from src.data_loader import WhisperDataHandler, DataCollatorSpeechSeq2SeqWithPadding
 from src.metrics import WERMetric
 
+# ─────────────────────────────────────────────
+# Required keys that MUST be present after merging config + CLI
+# ─────────────────────────────────────────────
+REQUIRED_KEYS = ["model_name", "output_dir", "language", "task"]
+
+
 def load_config(path="configs/config.yaml"):
+    """
+    Load a YAML config file.
+    - Warns (does not crash) when file is missing so pure-CLI usage still works.
+    - Returns an empty dict when the file is absent or blank.
+    """
     if os.path.exists(path):
         with open(path, "r") as f:
-            return yaml.safe_load(f) or {}
-    return {}
+            cfg = yaml.safe_load(f)
+            return cfg if isinstance(cfg, dict) else {}
+    else:
+        print(f"[Warning] Config file not found: '{path}'. Relying entirely on CLI arguments.")
+        return {}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Fine-tune Whisper for speech recognition")
@@ -47,9 +62,15 @@ def parse_args():
     parser.add_argument("--warmup_steps", type=int, help="Warmup steps")
     parser.add_argument("--lr_scheduler_type", type=str, help="LR scheduler: linear, cosine, constant, etc.")
 
-    # Precision
-    parser.add_argument("--fp16", action="store_true", default=None, help="Use FP16 mixed precision")
-    parser.add_argument("--no_fp16", action="store_true", help="Disable FP16")
+    # FIX: Use mutually exclusive group for fp16 so the intent is always unambiguous.
+    # --fp16       → force enable  (cfg["fp16"] = True)
+    # --no_fp16    → force disable (cfg["fp16"] = False)
+    # neither flag → leave cfg["fp16"] as defined in YAML (or default False)
+    fp16_group = parser.add_mutually_exclusive_group()
+    fp16_group.add_argument("--fp16",    dest="fp16", action="store_true",  default=None,
+                            help="Enable FP16 mixed precision")
+    fp16_group.add_argument("--no_fp16", dest="fp16", action="store_false",
+                            help="Disable FP16 mixed precision")
 
     # Eval & saving
     parser.add_argument("--eval_strategy", type=str, help="Evaluation strategy: 'steps' or 'epoch'")
@@ -64,52 +85,76 @@ def parse_args():
 
     return parser.parse_args()
 
+
 def build_config(args):
-    """Load config.yaml, then override with any CLI arguments that were explicitly provided."""
+    """
+    Merge strategy (highest priority last wins):
+      1. Hardcoded defaults inside this function
+      2. Values loaded from YAML config file
+      3. Any CLI argument that was *explicitly* provided by the user
+
+    A CLI arg is considered 'explicitly provided' when its value is not None
+    (all optional args default to None so this check is reliable).
+    """
     cfg = load_config(args.config)
 
+    # Maps CLI dest-name  →  config key used throughout the rest of the script
     cli_to_cfg = {
-        "model_name_or_path": "model_name",
-        "dataset_name":       "dataset_name",
-        "dataset_path":       "/kaggle/input/datasets/ilewanducki/vimd-whisper-autotruncate/vimd-whisper-autotruncate",
-        "language":           "language",
-        "task":               "task",
-        "output_dir":         "output_dir",
-        "num_train_epochs":   "num_epochs",
-        "max_steps":          "max_steps",
+        "model_name_or_path":           "model_name",
+        "dataset_name":                 "dataset_name",
+        "dataset_path":                 "dataset_path",
+        "language":                     "language",
+        "task":                         "task",
+        "output_dir":                   "output_dir",
+        "num_train_epochs":             "num_epochs",
+        "max_steps":                    "max_steps",
         "per_device_train_batch_size":  "batch_size",
         "per_device_eval_batch_size":   "eval_batch_size",
         "gradient_accumulation_steps":  "gradient_accumulation_steps",
-        "learning_rate":      "learning_rate",
-        "weight_decay":       "weight_decay",
-        "warmup_steps":       "warmup_steps",
-        "lr_scheduler_type":  "lr_scheduler_type",
-        "eval_strategy":      "eval_strategy",
-        "save_steps":         "save_steps",
-        "eval_steps":         "eval_steps",
-        "logging_steps":      "logging_steps",
-        "save_total_limit":   "save_total_limit",
-        "report_to":          "report_to",
-        "run_name":           "run_name",
+        "learning_rate":                "learning_rate",
+        "weight_decay":                 "weight_decay",
+        "warmup_steps":                 "warmup_steps",
+        "lr_scheduler_type":            "lr_scheduler_type",
+        "eval_strategy":                "eval_strategy",
+        "save_steps":                   "save_steps",
+        "eval_steps":                   "eval_steps",
+        "logging_steps":                "logging_steps",
+        "save_total_limit":             "save_total_limit",
+        "report_to":                    "report_to",
+        "run_name":                     "run_name",
     }
 
-    # Override config with explicitly-provided CLI args
+    # Override config with explicitly-provided CLI args (value is not None)
     for cli_key, cfg_key in cli_to_cfg.items():
         val = getattr(args, cli_key, None)
         if val is not None:
             cfg[cfg_key] = val
 
-    # Handle fp16 flags
-    if args.no_fp16:
-        cfg["fp16"] = False
-    elif args.fp16:
-        cfg["fp16"] = True
+    # FIX: args.fp16 is now None / True / False (mutually exclusive group).
+    # Only write to cfg when the user explicitly passed a flag.
+    if args.fp16 is not None:
+        cfg["fp16"] = args.fp16
 
     # Handle do_train / do_eval flags
     cfg["do_train"] = args.do_train
     cfg["do_eval"]  = args.do_eval
 
+    # FIX: Normalise report_to — always store as a list so downstream code
+    # can iterate it without type-checking.
+    report_to = cfg.get("report_to", ["wandb"])
+    if isinstance(report_to, str):
+        cfg["report_to"] = [report_to]
+
+    # FIX: Validate that all required keys are present after merging.
+    missing = [k for k in REQUIRED_KEYS if not cfg.get(k)]
+    if missing:
+        raise ValueError(
+            f"Missing required config value(s): {missing}. "
+            "Provide them via the YAML config file or the corresponding CLI flags."
+        )
+
     return cfg
+
 
 def main():
     args = parse_args()
@@ -127,6 +172,7 @@ def main():
     print(f"  Batch size: {cfg.get('batch_size', 4)}")
     print(f"  LR        : {cfg.get('learning_rate', 1e-5)}")
     print(f"  Output    : {cfg.get('output_dir')}")
+    print(f"  FP16      : {cfg.get('fp16', False)}")
     print(f"  do_train={do_train}, do_eval={do_eval}")
 
     # 1. Load processor & model
