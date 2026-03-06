@@ -3,9 +3,7 @@ from transformers import WhisperProcessor, WhisperForConditionalGeneration, Seq2
 from src.data_loader import WhisperDataHandler, DataCollatorSpeechSeq2SeqWithPadding
 from src.metrics import WERMetric
 
-# ─────────────────────────────────────────────
-# Required keys that MUST be present after merging config + CLI
-# ─────────────────────────────────────────────
+
 REQUIRED_KEYS = ["model_name", "output_dir", "language", "task"]
 
 
