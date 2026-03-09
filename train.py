@@ -180,7 +180,7 @@ def main():
     print(f"  Mel bins  : {processor.feature_extractor.feature_size}")
 
     model.config.forced_decoder_ids = None
-    model.config.suppress_tokens = []
+    model.generation_config.suppress_tokens = []
     model.config.use_cache = False
 
     # 2. Prepare Data
