@@ -168,8 +168,11 @@ def main():
     print("Configuration loaded.")
     print(f"  Model     : {cfg.get('model_name')}")
     print(f"  Epochs    : {cfg.get('num_epochs', 3)}")
+    print(f"  Max Steps : {cfg.get('max_steps', -1)}")
     print(f"  Batch size: {cfg.get('batch_size', 4)}")
+    print(f"  Grad Accum: {cfg.get('gradient_accumulation_steps', 1)}")
     print(f"  LR        : {cfg.get('learning_rate', 1e-5)}")
+    print(f"  Warmup Stp: {cfg.get('warmup_steps', 0)}")
     print(f"  Output    : {cfg.get('output_dir')}")
     print(f"  FP16      : {cfg.get('fp16', False)}")
     print(f"  do_train={do_train}, do_eval={do_eval}")
@@ -177,7 +180,10 @@ def main():
     # 1. Load processor & model
     processor = WhisperProcessor.from_pretrained(cfg['model_name'], language=cfg['language'], task=cfg['task'])
     model = WhisperForConditionalGeneration.from_pretrained(cfg['model_name'])
+    
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Mel bins  : {processor.feature_extractor.feature_size}")
+    print(f"  Trainable params: {trainable_params:,}")
 
     model.config.forced_decoder_ids = None
     model.generation_config.suppress_tokens = []
