@@ -257,7 +257,8 @@ def main():
 
     # 6. Run
     if do_train:
-        trainer.train(resume_from_checkpoint=last_checkpoint)
+        train_result = trainer.train(resume_from_checkpoint=last_checkpoint)
+        print(f"\nTraining completed. Max steps run: {train_result.global_step}")
         # Save Final Model
         trainer.save_model(os.path.join(cfg['output_dir'], "final_model"))
         processor.save_pretrained(os.path.join(cfg['output_dir'], "final_model"))
