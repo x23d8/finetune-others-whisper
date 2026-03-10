@@ -2,8 +2,8 @@ model_name: "openai/whisper-small"
 language: "vi"
 task: "transcribe"
 dataset_name: "nguyendv02/ViMD_Dataset"
-num_epochs: 5
-# max_steps: 3000
+num_epochs: 10
+max_steps: 11820
 batch_size: 4            # P100: 1;  T4/V100: 16
 eval_batch_size: 8
 gradient_accumulation_steps: 2   # P100: 16; T4/V100: 2
