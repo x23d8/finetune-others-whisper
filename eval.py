@@ -1,0 +1,160 @@
+import os
+os.environ["HF_HOME"] = "D:/hf_cache"
+os.environ["HF_DATASETS_CACHE"] = "D:/hf_cache/datasets"
+os.environ["TRANSFORMERS_CACHE"] = "D:/hf_cache/models"
+
+import argparse
+import time
+import torch
+import soundfile as sf
+import torchaudio
+import evaluate
+from tqdm import tqdm
+from transformers import WhisperProcessor, WhisperForConditionalGeneration
+from torch.utils.data import Dataset, DataLoader
+
+TARGET_SR = 16000
+
+class VivosDataset(Dataset):
+    def __init__(self, data_dir, processor):
+        self.data_dir = data_dir
+        self.processor = processor
+        self.prompts_file = os.path.join(data_dir, "test", "prompts.txt")
+        self.waves_dir = os.path.join(data_dir, "test", "waves")
+        self.samples = []
+        
+        with open(self.prompts_file, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(" ", 1)
+                if len(parts) == 2:
+                    speaker_utt_id = parts[0]
+                    transcript = parts[1]
+                    speaker_id = speaker_utt_id.split("_")[0]
+                    audio_path = os.path.join(self.waves_dir, speaker_id, f"{speaker_utt_id}.wav")
+                    if os.path.exists(audio_path):
+                        self.samples.append({
+                            "audio_path": audio_path,
+                            "text": transcript
+                        })
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        array, sr = sf.read(sample["audio_path"], dtype="float32")
+        array = torch.from_numpy(array)
+        
+        if array.ndim > 1:
+            array = array.mean(dim=1)
+            
+        if sr != TARGET_SR:
+            array = torchaudio.functional.resample(array, sr, TARGET_SR)
+            
+        input_features = self.processor.feature_extractor(array, sampling_rate=TARGET_SR, return_tensors="pt").input_features[0]
+        
+        return {
+            "input_features": input_features,
+            "reference": sample["text"]
+        }
+
+def collate_fn(batch):
+    input_features = [item["input_features"] for item in batch]
+    references = [item["reference"] for item in batch]
+    input_features = torch.stack(input_features)
+    return {"input_features": input_features, "references": references}
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate Whisper on VIVOS dataset")
+    parser.add_argument("--model_name_or_path", type=str, required=True, help="Path to fine-tuned model")
+    parser.add_argument("--processor_name", type=str, default=None, help="Path/name of the original base model for the processor (e.g., openai/whisper-tiny) to avoid tokenizer load errors.")
+    parser.add_argument("--dataset_path", type=str, default="E:/data/vivos/vivos", help="Path to VIVOS dataset root")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for evaluation")
+    parser.add_argument("--language", type=str, default="vi", help="Language code")
+    parser.add_argument("--task", type=str, default="transcribe", help="Task")
+    parser.add_argument("--report_to", type=str, default="none", help="Reporting integrations: wandb, none")
+    parser.add_argument("--run_name", type=str, default="whisper-eval", help="Run name for experiment tracking")
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading processor from {args.processor_name or args.model_name_or_path} ...")
+    print(f"Loading model from {args.model_name_or_path} ...")
+    
+    proc_name = args.processor_name if args.processor_name else args.model_name_or_path
+    processor = WhisperProcessor.from_pretrained(proc_name, language=args.language, task=args.task)
+    model = WhisperForConditionalGeneration.from_pretrained(args.model_name_or_path).to(device)
+    model.eval()
+
+    print(f"Loading VIVOS test dataset from {args.dataset_path} ...")
+    dataset = VivosDataset(args.dataset_path, processor)
+    
+    print(f"Found {len(dataset)} valid samples in the dataset.")
+    if len(dataset) == 0:
+        print("No samples found! Check dataset path.")
+        return
+
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, collate_fn=collate_fn, num_workers=2)
+
+    wer_metric = evaluate.load("wer")
+    cer_metric = evaluate.load("cer")
+
+    all_references = []
+    all_predictions = []
+    
+    total_inference_time = 0.0
+    total_samples = 0
+
+    print("Starting evaluation...")
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader):
+            input_features = batch["input_features"].to(device)
+            references = batch["references"]
+            
+            start_time = time.time()
+            predicted_ids = model.generate(input_features)
+            end_time = time.time()
+            
+            total_inference_time += (end_time - start_time)
+            total_samples += len(references)
+            
+            transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
+            
+            # Normalize text for fair comparison
+            transcription = [t.lower() for t in transcription]
+            references = [r.lower() for r in references]
+            
+            all_predictions.extend(transcription)
+            all_references.extend(references)
+
+    wer = wer_metric.compute(predictions=all_predictions, references=all_references)
+    cer = cer_metric.compute(predictions=all_predictions, references=all_references)
+    avg_inference_time = total_inference_time / total_samples
+
+    print("\n" + "="*40)
+    print("EVALUATION RESULTS")
+    print("="*40)
+    print(f"Dataset         : VIVOS Test Set")
+    print(f"Total Samples   : {total_samples}")
+    print(f"WER             : {wer * 100:.2f}%")
+    print(f"CER             : {cer * 100:.2f}%")
+    print(f"Avg Inf. Time   : {avg_inference_time:.4f} seconds/sample")
+    print("="*40)
+    
+    if args.report_to.lower() == "wandb":
+        import wandb
+        wandb.init(project="whisper-finetune", name=args.run_name, config=vars(args))
+        wandb.log({
+            "eval/wer": wer,
+            "eval/cer": cer,
+            "eval/avg_inference_time": avg_inference_time,
+            "eval/total_samples": total_samples
+        })
+        print("Logged results to WandB.")
+        wandb.finish()
+
+if __name__ == "__main__":
+    main()
