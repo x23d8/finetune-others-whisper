@@ -27,6 +27,28 @@ def parse_args():
     parser.add_argument("--run_name", type=str, default="whisper-eval-vimd", help="Run name for experiment tracking")
     return parser.parse_args()
 
+
+def compute_and_print_results(all_predictions, all_references, total_inference_time, total_samples,
+                               wer_metric, cer_metric, interrupted=False):
+    """Compute final/partial metrics and print them."""
+    label = "PARTIAL RESULTS (interrupted)" if interrupted else "EVALUATION RESULTS"
+    wer = wer_metric.compute(predictions=all_predictions, references=all_references)
+    cer = cer_metric.compute(predictions=all_predictions, references=all_references)
+    avg_inference_time = total_inference_time / total_samples if total_samples > 0 else 0.0
+
+    print("\n" + "="*40)
+    print(label)
+    print("="*40)
+    print(f"Dataset         : VIMD Parquet ({total_samples} samples evaluated)")
+    print(f"Total Samples   : {total_samples}")
+    print(f"WER             : {wer * 100:.2f}%")
+    print(f"CER             : {cer * 100:.2f}%")
+    print(f"Avg Inf. Time   : {avg_inference_time:.4f} seconds/sample")
+    print("="*40)
+
+    return wer, cer, avg_inference_time
+
+
 def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -112,54 +134,92 @@ def main():
     total_inference_time = 0.0
     total_samples = 0
 
-    print("Starting evaluation...")
-    
-    with torch.no_grad():
-        for batch in tqdm(dataloader):
-            input_features = batch["input_features"].to(device)
-            references = batch["references"]
-            
-            start_time = time.time()
-            predicted_ids = model.generate(input_features)
-            end_time = time.time()
-            
-            total_inference_time += (end_time - start_time)
-            total_samples += len(references)
-            
-            transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
-            
-            # Normalize text for fair comparison
-            transcription = [t.lower() for t in transcription]
-            references = [r.lower() for r in references]
-            
-            all_predictions.extend(transcription)
-            all_references.extend(references)
-
-    wer = wer_metric.compute(predictions=all_predictions, references=all_references)
-    cer = cer_metric.compute(predictions=all_predictions, references=all_references)
-    avg_inference_time = total_inference_time / total_samples
-
-    print("\n" + "="*40)
-    print("EVALUATION RESULTS")
-    print("="*40)
-    print(f"Dataset         : VIMD Parquet Test Set")
-    print(f"Total Samples   : {total_samples}")
-    print(f"WER             : {wer * 100:.2f}%")
-    print(f"CER             : {cer * 100:.2f}%")
-    print(f"Avg Inf. Time   : {avg_inference_time:.4f} seconds/sample")
-    print("="*40)
-    
+    # Initialize WandB early so we can log per-step metrics
+    wandb_run = None
     if args.report_to.lower() == "wandb":
         import wandb
-        wandb.init(project="whisper-finetune", name=args.run_name, config=vars(args))
-        wandb.log({
-            "eval/wer": wer,
-            "eval/cer": cer,
-            "eval/avg_inference_time": avg_inference_time,
-            "eval/total_samples": total_samples
+        wandb_run = wandb.init(project="whisper-finetune", name=args.run_name, config=vars(args))
+        print("WandB initialized. Will log per-step metrics.")
+
+    print("Starting evaluation... (Press Ctrl+C to stop early and compute partial results)")
+
+    interrupted = False
+    step = 0
+
+    try:
+        with torch.no_grad():
+            for batch in tqdm(dataloader):
+                input_features = batch["input_features"].to(device)
+                references = batch["references"]
+                
+                start_time = time.time()
+                predicted_ids = model.generate(input_features)
+                end_time = time.time()
+                
+                batch_inference_time = end_time - start_time
+                total_inference_time += batch_inference_time
+                total_samples += len(references)
+                
+                transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
+                
+                # Normalize text for fair comparison
+                transcription = [t.lower() for t in transcription]
+                references_norm = [r.lower() for r in references]
+                
+                all_predictions.extend(transcription)
+                all_references.extend(references_norm)
+
+                # Compute per-step (cumulative) metrics
+                step_wer = wer_metric.compute(predictions=all_predictions, references=all_references)
+                step_cer = cer_metric.compute(predictions=all_predictions, references=all_references)
+                step_avg_inf_time = total_inference_time / total_samples
+
+                step += 1
+
+                # Print step metrics to console
+                print(f"\n[Step {step}] samples={total_samples} | "
+                      f"WER={step_wer*100:.2f}% | CER={step_cer*100:.2f}% | "
+                      f"Avg Inf. Time={step_avg_inf_time:.4f}s/sample")
+
+                # Log per-step metrics to WandB
+                if wandb_run is not None:
+                    wandb_run.log({
+                        "eval/step_wer": step_wer,
+                        "eval/step_cer": step_cer,
+                        "eval/step_avg_inference_time": step_avg_inf_time,
+                        "eval/samples_processed": total_samples,
+                    }, step=step)
+
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n\n[!] Interrupted by user. Computing results from samples evaluated so far...")
+
+    # Compute and print final (or partial) results
+    if total_samples == 0:
+        print("No samples were evaluated.")
+        if wandb_run is not None:
+            wandb_run.finish()
+        return
+
+    wer, cer, avg_inference_time = compute_and_print_results(
+        all_predictions, all_references,
+        total_inference_time, total_samples,
+        wer_metric, cer_metric,
+        interrupted=interrupted
+    )
+
+    # Log final/summary metrics to WandB
+    if wandb_run is not None:
+        tag = "partial" if interrupted else "final"
+        wandb_run.log({
+            f"eval/{tag}_wer": wer,
+            f"eval/{tag}_cer": cer,
+            f"eval/{tag}_avg_inference_time": avg_inference_time,
+            f"eval/{tag}_total_samples": total_samples,
         })
-        print("Logged results to WandB.")
-        wandb.finish()
+        print(f"Logged {'partial' if interrupted else 'final'} summary results to WandB.")
+        wandb_run.finish()
+
 
 if __name__ == "__main__":
     main()
