@@ -12,6 +12,7 @@ import evaluate
 from tqdm import tqdm
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from torch.utils.data import Dataset, DataLoader
+from datasets import load_dataset
 
 TARGET_SR = 16000
 
@@ -58,6 +59,39 @@ class VivosDataset(Dataset):
             "reference": sample["text"]
         }
 
+class VivosHFDataset(Dataset):
+    """Loads VIVOS test split from the Hugging Face Hub."""
+    def __init__(self, dataset_name, processor):
+        self.processor = processor
+        print(f"Loading dataset '{dataset_name}' (test split) from Hugging Face Hub...")
+        hf_ds = load_dataset(dataset_name, split="test")
+        self.samples = hf_ds
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        audio = sample["audio"]
+        array = torch.tensor(audio["array"], dtype=torch.float32)
+        sr = audio["sampling_rate"]
+
+        if array.ndim > 1:
+            array = array.mean(dim=1)
+
+        if sr != TARGET_SR:
+            array = torchaudio.functional.resample(array, sr, TARGET_SR)
+
+        input_features = self.processor.feature_extractor(
+            array, sampling_rate=TARGET_SR, return_tensors="pt"
+        ).input_features[0]
+
+        return {
+            "input_features": input_features,
+            "reference": sample["sentence"],
+        }
+
+
 def collate_fn(batch):
     input_features = [item["input_features"] for item in batch]
     references = [item["reference"] for item in batch]
@@ -68,7 +102,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate Whisper on VIVOS dataset")
     parser.add_argument("--model_name_or_path", type=str, required=True, help="Path to fine-tuned model")
     parser.add_argument("--processor_name", type=str, default=None, help="Path/name of the original base model for the processor (e.g., openai/whisper-tiny) to avoid tokenizer load errors.")
-    parser.add_argument("--dataset_path", type=str, default="E:/data/vivos/vivos", help="Path to VIVOS dataset root")
+    parser.add_argument("--dataset_dir", type=str, default=None, help="Path to VIVOS dataset root. If absent or invalid, falls back to --hf_dataset_name.")
+    parser.add_argument("--hf_dataset_name", type=str, default="AILAB-VNUHCM/vivos", help="HuggingFace dataset name used as fallback when dataset_dir is not available.")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for evaluation")
     parser.add_argument("--language", type=str, default="vi", help="Language code")
     parser.add_argument("--task", type=str, default="transcribe", help="Task")
@@ -110,8 +145,15 @@ def main():
     model = WhisperForConditionalGeneration.from_pretrained(args.model_name_or_path).to(device)
     model.eval()
 
-    print(f"Loading VIVOS test dataset from {args.dataset_path} ...")
-    dataset = VivosDataset(args.dataset_path, processor)
+    use_local = args.dataset_dir and os.path.isdir(args.dataset_dir)
+    if use_local:
+        print(f"Loading VIVOS test dataset from local path: {args.dataset_dir} ...")
+        dataset = VivosDataset(args.dataset_dir, processor)
+    else:
+        if args.dataset_dir:
+            print(f"[Warning] dataset_dir '{args.dataset_dir}' not found. Falling back to HF Hub.")
+        print(f"Loading VIVOS test dataset from HF Hub: {args.hf_dataset_name} ...")
+        dataset = VivosHFDataset(args.hf_dataset_name, processor)
     
     print(f"Found {len(dataset)} valid samples in the dataset.")
     if len(dataset) == 0:
