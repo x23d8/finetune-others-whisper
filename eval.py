@@ -17,26 +17,32 @@ from datasets import load_dataset
 TARGET_SR = 16000
 
 class VivosDataset(Dataset):
-    def __init__(self, data_dir, processor):
+    """Loads VIVOS from a local directory across one or more splits (e.g. train, test)."""
+    def __init__(self, data_dir, processor, splits=("train", "test")):
         self.data_dir = data_dir
         self.processor = processor
-        self.prompts_file = os.path.join(data_dir, "test", "prompts.txt")
-        self.waves_dir = os.path.join(data_dir, "test", "waves")
         self.samples = []
-        
-        with open(self.prompts_file, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.strip().split(" ", 1)
-                if len(parts) == 2:
-                    speaker_utt_id = parts[0]
-                    transcript = parts[1]
-                    speaker_id = speaker_utt_id.split("_")[0]
-                    audio_path = os.path.join(self.waves_dir, speaker_id, f"{speaker_utt_id}.wav")
-                    if os.path.exists(audio_path):
-                        self.samples.append({
-                            "audio_path": audio_path,
-                            "text": transcript
-                        })
+
+        for split in splits:
+            prompts_file = os.path.join(data_dir, split, "prompts.txt")
+            waves_dir = os.path.join(data_dir, split, "waves")
+            if not os.path.exists(prompts_file):
+                print(f"[Warning] Prompts file not found for split '{split}': {prompts_file} — skipping.")
+                continue
+            print(f"  Loading local split '{split}' from {prompts_file} ...")
+            with open(prompts_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split(" ", 1)
+                    if len(parts) == 2:
+                        speaker_utt_id = parts[0]
+                        transcript = parts[1]
+                        speaker_id = speaker_utt_id.split("_")[0]
+                        audio_path = os.path.join(waves_dir, speaker_id, f"{speaker_utt_id}.wav")
+                        if os.path.exists(audio_path):
+                            self.samples.append({
+                                "audio_path": audio_path,
+                                "text": transcript
+                            })
 
     def __len__(self):
         return len(self.samples)
@@ -45,27 +51,31 @@ class VivosDataset(Dataset):
         sample = self.samples[idx]
         array, sr = sf.read(sample["audio_path"], dtype="float32")
         array = torch.from_numpy(array)
-        
+
         if array.ndim > 1:
             array = array.mean(dim=1)
-            
+
         if sr != TARGET_SR:
             array = torchaudio.functional.resample(array, sr, TARGET_SR)
-            
+
         input_features = self.processor.feature_extractor(array, sampling_rate=TARGET_SR, return_tensors="pt").input_features[0]
-        
+
         return {
             "input_features": input_features,
             "reference": sample["text"]
         }
 
 class VivosHFDataset(Dataset):
-    """Loads VIVOS test split from the Hugging Face Hub."""
-    def __init__(self, dataset_name, processor):
+    """Loads VIVOS from the Hugging Face Hub across one or more splits (e.g. train, test)."""
+    def __init__(self, dataset_name, processor, splits=("train", "test")):
         self.processor = processor
-        print(f"Loading dataset '{dataset_name}' (test split) from Hugging Face Hub...")
-        hf_ds = load_dataset(dataset_name, split="test")
-        self.samples = hf_ds
+        all_splits = []
+        for split in splits:
+            print(f"  Loading HF split '{split}' from '{dataset_name}' ...")
+            all_splits.append(load_dataset(dataset_name, split=split))
+        # Concatenate all splits into one
+        from datasets import concatenate_datasets
+        self.samples = concatenate_datasets(all_splits)
 
     def __len__(self):
         return len(self.samples)
@@ -104,6 +114,7 @@ def parse_args():
     parser.add_argument("--processor_name", type=str, default=None, help="Path/name of the original base model for the processor (e.g., openai/whisper-tiny) to avoid tokenizer load errors.")
     parser.add_argument("--dataset_dir", type=str, default=None, help="Path to VIVOS dataset root. If absent or invalid, falls back to --hf_dataset_name.")
     parser.add_argument("--hf_dataset_name", type=str, default="AILAB-VNUHCM/vivos", help="HuggingFace dataset name used as fallback when dataset_dir is not available.")
+    parser.add_argument("--splits", type=str, nargs="+", default=["train", "test"], help="Dataset splits to evaluate on (e.g. --splits train test).")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for evaluation")
     parser.add_argument("--language", type=str, default="vi", help="Language code")
     parser.add_argument("--task", type=str, default="transcribe", help="Task")
@@ -113,7 +124,7 @@ def parse_args():
 
 
 def compute_and_print_results(all_predictions, all_references, total_inference_time, total_samples,
-                               wer_metric, cer_metric, interrupted=False):
+                               wer_metric, cer_metric, interrupted=False, **kwargs):
     """Compute final/partial metrics and print them."""
     label = "PARTIAL RESULTS (interrupted)" if interrupted else "EVALUATION RESULTS"
     wer = wer_metric.compute(predictions=all_predictions, references=all_references)
@@ -123,7 +134,7 @@ def compute_and_print_results(all_predictions, all_references, total_inference_t
     print("\n" + "="*40)
     print(label)
     print("="*40)
-    print(f"Dataset         : VIVOS Test Set")
+    print(f"Dataset         : VIVOS ({', '.join(kwargs.get('splits', ['test']))} split(s))")
     print(f"Total Samples   : {total_samples}")
     print(f"WER             : {wer * 100:.2f}%")
     print(f"CER             : {cer * 100:.2f}%")
@@ -145,15 +156,16 @@ def main():
     model = WhisperForConditionalGeneration.from_pretrained(args.model_name_or_path).to(device)
     model.eval()
 
+    splits = args.splits
     use_local = args.dataset_dir and os.path.isdir(args.dataset_dir)
     if use_local:
-        print(f"Loading VIVOS test dataset from local path: {args.dataset_dir} ...")
-        dataset = VivosDataset(args.dataset_dir, processor)
+        print(f"Loading VIVOS dataset (splits: {splits}) from local path: {args.dataset_dir} ...")
+        dataset = VivosDataset(args.dataset_dir, processor, splits=splits)
     else:
         if args.dataset_dir:
             print(f"[Warning] dataset_dir '{args.dataset_dir}' not found. Falling back to HF Hub.")
-        print(f"Loading VIVOS test dataset from HF Hub: {args.hf_dataset_name} ...")
-        dataset = VivosHFDataset(args.hf_dataset_name, processor)
+        print(f"Loading VIVOS dataset (splits: {splits}) from HF Hub: {args.hf_dataset_name} ...")
+        dataset = VivosHFDataset(args.hf_dataset_name, processor, splits=splits)
     
     print(f"Found {len(dataset)} valid samples in the dataset.")
     if len(dataset) == 0:
@@ -242,7 +254,8 @@ def main():
         all_predictions, all_references,
         total_inference_time, total_samples,
         wer_metric, cer_metric,
-        interrupted=interrupted
+        interrupted=interrupted,
+        splits=splits
     )
 
     # Log final/summary metrics to WandB
